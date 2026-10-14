@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REMOTE_DIR="${REMOTE_DIR:-/opt/readonly-k8s-mcp}"
+SERVICE_NAME="readonly-k8s-mcp"
+ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG:-/etc/kubernetes/admin.conf}"
+KUBECTL="${KUBECTL:-/usr/local/bin/kubectl}"
+CLUSTER_MARK="k8s-10.0.0.20"
+CONTEXT_NAME="readonly-k8s-mcp-${CLUSTER_MARK}"
+SA_NAME="readonly-k8s-mcp"
+SA_NAMESPACE="kube-system"
+RBAC_FILE="${REMOTE_DIR}/kubernetes-readonly-rbac.${CLUSTER_MARK}.yaml"
+TOKEN_FILE="${REMOTE_DIR}/mcp-token.${CLUSTER_MARK}"
+KUBECONFIG_TMP="$(mktemp)"
+CA_TMP="$(mktemp)"
+
+cleanup() {
+  rm -f "${KUBECONFIG_TMP}" "${CA_TMP}"
+}
+trap cleanup EXIT
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing required command: $1" >&2
+    exit 1
+  }
+}
+
+require_cmd "${KUBECTL}"
+require_cmd openssl
+require_cmd ssh
+require_cmd ssh-keygen
+require_cmd ssh-keyscan
+require_cmd python3
+
+install -d -m 0750 -o root -g "${SERVICE_NAME}" "${REMOTE_DIR}"
+install -d -m 0750 -o "${SERVICE_NAME}" -g "${SERVICE_NAME}" "${REMOTE_DIR}/logs"
+
+cat >"${RBAC_FILE}" <<'YAML'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: readonly-k8s-mcp
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: readonly-k8s-mcp
+    app.kubernetes.io/component: mcp-readonly-access
+    app.kubernetes.io/managed-by: codex
+    readonly-k8s-mcp.openai.com/cluster: k8s-10.0.0.20
+  annotations:
+    readonly-k8s-mcp.openai.com/generated-on: "10.0.0.20"
+    readonly-k8s-mcp.openai.com/purpose: "Codex readonly MCP access for the new 10.0.0.20 Kubernetes cluster"
+    readonly-k8s-mcp.openai.com/not-for: "old 10.12.46.x cluster"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: readonly-k8s-mcp
+  labels:
+    app.kubernetes.io/name: readonly-k8s-mcp
+    app.kubernetes.io/component: mcp-readonly-access
+    app.kubernetes.io/managed-by: codex
+    readonly-k8s-mcp.openai.com/cluster: k8s-10.0.0.20
+  annotations:
+    readonly-k8s-mcp.openai.com/generated-on: "10.0.0.20"
+    readonly-k8s-mcp.openai.com/not-for: "old 10.12.46.x cluster"
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - services
+      - endpoints
+      - events
+      - persistentvolumes
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: readonly-k8s-mcp
+  labels:
+    app.kubernetes.io/name: readonly-k8s-mcp
+    app.kubernetes.io/component: mcp-readonly-access
+    app.kubernetes.io/managed-by: codex
+    readonly-k8s-mcp.openai.com/cluster: k8s-10.0.0.20
+  annotations:
+    readonly-k8s-mcp.openai.com/generated-on: "10.0.0.20"
+    readonly-k8s-mcp.openai.com/not-for: "old 10.12.46.x cluster"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: readonly-k8s-mcp
+subjects:
+  - kind: ServiceAccount
+    name: readonly-k8s-mcp
+    namespace: kube-system
+YAML
+
+"${KUBECTL}" --kubeconfig="${ADMIN_KUBECONFIG}" apply -f "${RBAC_FILE}"
+
+SA_TOKEN="$("${KUBECTL}" --kubeconfig="${ADMIN_KUBECONFIG}" -n "${SA_NAMESPACE}" create token "${SA_NAME}" --duration=8760h 2>/dev/null || "${KUBECTL}" --kubeconfig="${ADMIN_KUBECONFIG}" -n "${SA_NAMESPACE}" create token "${SA_NAME}")"
+SERVER="$("${KUBECTL}" --kubeconfig="${ADMIN_KUBECONFIG}" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+"${KUBECTL}" --kubeconfig="${ADMIN_KUBECONFIG}" config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d >"${CA_TMP}"
+
+"${KUBECTL}" config set-cluster "${CONTEXT_NAME}" \
+  --server="${SERVER}" \
+  --certificate-authority="${CA_TMP}" \
+  --embed-certs=true \
+  --kubeconfig="${KUBECONFIG_TMP}" >/dev/null
+"${KUBECTL}" config set-credentials "${SA_NAME}" \
+  --token="${SA_TOKEN}" \
+  --kubeconfig="${KUBECONFIG_TMP}" >/dev/null
+"${KUBECTL}" config set-context "${CONTEXT_NAME}" \
+  --cluster="${CONTEXT_NAME}" \
+  --user="${SA_NAME}" \
+  --namespace=default \
+  --kubeconfig="${KUBECONFIG_TMP}" >/dev/null
+"${KUBECTL}" config use-context "${CONTEXT_NAME}" --kubeconfig="${KUBECONFIG_TMP}" >/dev/null
+install -m 0640 -o root -g "${SERVICE_NAME}" "${KUBECONFIG_TMP}" "${REMOTE_DIR}/kubeconfig"
+
+openssl rand -hex 32 >"${TOKEN_FILE}"
+chown root:"${SERVICE_NAME}" "${TOKEN_FILE}"
+chmod 0640 "${TOKEN_FILE}"
+
+rm -f "${REMOTE_DIR}/id_ed25519" "${REMOTE_DIR}/id_ed25519.pub"
+ssh-keygen -t ed25519 -N "" -f "${REMOTE_DIR}/id_ed25519" -C "readonly-k8s-mcp@${CLUSTER_MARK}" >/dev/null
+chown "${SERVICE_NAME}":"${SERVICE_NAME}" "${REMOTE_DIR}/id_ed25519"
+chmod 0600 "${REMOTE_DIR}/id_ed25519"
+chmod 0644 "${REMOTE_DIR}/id_ed25519.pub"
+ssh-keyscan -H 10.0.0.20 10.0.0.21 >"${REMOTE_DIR}/known_hosts" 2>/dev/null
+chown root:"${SERVICE_NAME}" "${REMOTE_DIR}/known_hosts"
+chmod 0644 "${REMOTE_DIR}/known_hosts"
+
+PUB_KEY="$(cat "${REMOTE_DIR}/id_ed25519.pub")"
+SUDOERS_TMP="$(mktemp)"
+cat >"${SUDOERS_TMP}" <<'SUDOERS'
+Defaults:codex-ro !requiretty
+
+Cmnd_Alias CODEX_RO_SYSTEM = \
+  /usr/bin/hostnamectl, \
+  /usr/bin/uptime, \
+  /usr/bin/free -m, \
+  /usr/bin/df -hT -x tmpfs -x devtmpfs, \
+  /usr/bin/lsblk -f, \
+  /usr/bin/ps aux --sort=-%mem, \
+  /usr/bin/ss -lntup, \
+  /usr/bin/systemctl status kubelet --no-pager -l, \
+  /usr/bin/systemctl status containerd --no-pager -l, \
+  /usr/bin/systemctl status docker --no-pager -l, \
+  /usr/bin/crictl ps -a, \
+  /usr/bin/docker ps -a --no-trunc, \
+  /usr/bin/journalctl -u kubelet --no-pager -n *, \
+  /usr/bin/journalctl -u containerd --no-pager -n *, \
+  /usr/bin/journalctl -u docker --no-pager -n *, \
+  /usr/bin/journalctl -u sshd --no-pager -n *
+
+codex-ro ALL=(root) NOPASSWD: CODEX_RO_SYSTEM
+SUDOERS
+
+configure_node() {
+  local host="$1"
+  if [[ "${host}" == "10.0.0.20" ]]; then
+    useradd --system --create-home --home-dir /home/codex-ro --shell /bin/bash codex-ro 2>/dev/null || true
+    usermod --shell /bin/bash codex-ro
+    install -d -m 0700 -o codex-ro -g codex-ro /home/codex-ro/.ssh
+    touch /home/codex-ro/.ssh/authorized_keys
+    chmod 0600 /home/codex-ro/.ssh/authorized_keys
+    chown codex-ro:codex-ro /home/codex-ro/.ssh/authorized_keys
+    grep -qxF "${PUB_KEY}" /home/codex-ro/.ssh/authorized_keys || printf '%s\n' "${PUB_KEY}" >> /home/codex-ro/.ssh/authorized_keys
+    install -m 0440 -o root -g root "${SUDOERS_TMP}" /etc/sudoers.d/codex-ro
+    visudo -cf /etc/sudoers.d/codex-ro >/dev/null
+  else
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "root@${host}" bash -s <<NODE_SCRIPT
+set -euo pipefail
+useradd --system --create-home --home-dir /home/codex-ro --shell /bin/bash codex-ro 2>/dev/null || true
+usermod --shell /bin/bash codex-ro
+install -d -m 0700 -o codex-ro -g codex-ro /home/codex-ro/.ssh
+touch /home/codex-ro/.ssh/authorized_keys
+chmod 0600 /home/codex-ro/.ssh/authorized_keys
+chown codex-ro:codex-ro /home/codex-ro/.ssh/authorized_keys
+grep -qxF '${PUB_KEY}' /home/codex-ro/.ssh/authorized_keys || printf '%s\n' '${PUB_KEY}' >> /home/codex-ro/.ssh/authorized_keys
+NODE_SCRIPT
+    scp "${SUDOERS_TMP}" "root@${host}:/tmp/codex-ro.sudoers"
+    ssh -o BatchMode=yes "root@${host}" "install -m 0440 -o root -g root /tmp/codex-ro.sudoers /etc/sudoers.d/codex-ro; rm -f /tmp/codex-ro.sudoers; visudo -cf /etc/sudoers.d/codex-ro >/dev/null"
+  fi
+}
+
+configure_node 10.0.0.20
+configure_node 10.0.0.21
+rm -f "${SUDOERS_TMP}"
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+remote_dir = Path("/opt/readonly-k8s-mcp")
+config_path = remote_dir / "config.json"
+token = (remote_dir / "mcp-token.k8s-10.0.0.20").read_text(encoding="utf-8").strip()
+config = json.loads(config_path.read_text(encoding="utf-8"))
+config["auth"]["bearer_token"] = token
+config["kubernetes"]["kubectl"] = "/usr/local/bin/kubectl"
+config["kubernetes"]["kubeconfig"] = "/opt/readonly-k8s-mcp/kubeconfig"
+config["kubernetes"]["context"] = "readonly-k8s-mcp-k8s-10.0.0.20"
+config["ssh"]["user"] = "codex-ro"
+config["ssh"]["identity_file"] = "/opt/readonly-k8s-mcp/id_ed25519"
+config["ssh"]["known_hosts_file"] = "/opt/readonly-k8s-mcp/known_hosts"
+config["nodes"] = [
+    {"name": "k8s-master01", "host": "10.0.0.20", "local": False},
+    {"name": "k8s-node01", "host": "10.0.0.21", "local": False},
+]
+config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+PY
+chown root:"${SERVICE_NAME}" "${REMOTE_DIR}/config.json"
+chmod 0640 "${REMOTE_DIR}/config.json"
+
+cat >"${REMOTE_DIR}/CLUSTER_MARKER" <<EOF_MARKER
+cluster_mark=${CLUSTER_MARK}
+generated_on_host=10.0.0.20
+admin_kubeconfig_source=${ADMIN_KUBECONFIG}
+readonly_kubeconfig=/opt/readonly-k8s-mcp/kubeconfig
+rbac_manifest=${RBAC_FILE}
+mcp_token_file=${TOKEN_FILE}
+nodes=10.0.0.20,10.0.0.21
+note=Generated for the new 10.0.0.20 Kubernetes cluster. Do not reuse old 10.12.46.x cluster credentials or node inventory.
+EOF_MARKER
+chown root:"${SERVICE_NAME}" "${REMOTE_DIR}/CLUSTER_MARKER"
+chmod 0640 "${REMOTE_DIR}/CLUSTER_MARKER"
+
+systemctl restart "${SERVICE_NAME}"
+systemctl --no-pager --full status "${SERVICE_NAME}"
+
+"${KUBECTL}" --kubeconfig="${REMOTE_DIR}/kubeconfig" get nodes -o wide
+ssh -i "${REMOTE_DIR}/id_ed25519" \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="${REMOTE_DIR}/known_hosts" \
+  codex-ro@10.0.0.20 /usr/bin/hostnamectl >/dev/null
+ssh -i "${REMOTE_DIR}/id_ed25519" \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="${REMOTE_DIR}/known_hosts" \
+  codex-ro@10.0.0.21 /usr/bin/hostnamectl >/dev/null

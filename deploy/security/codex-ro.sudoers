@@ -1,0 +1,27 @@
+# Install as /etc/sudoers.d/codex-ro with mode 0440 on every node.
+# Keep this list aligned with config.commands and node_journal.
+#
+# The MCP service must not receive a general shell, package manager, reboot,
+# kubectl apply/delete, rm, mv, chmod, chown, tee, or editor permission.
+
+Defaults:codex-ro !requiretty
+
+Cmnd_Alias CODEX_RO_SYSTEM = \
+  /usr/bin/hostnamectl, \
+  /usr/bin/uptime, \
+  /usr/bin/free -m, \
+  /usr/bin/df -hT -x tmpfs -x devtmpfs, \
+  /usr/bin/lsblk -f, \
+  /usr/bin/ps aux --sort=-%mem, \
+  /usr/bin/ss -lntup, \
+  /usr/bin/systemctl status kubelet --no-pager -l, \
+  /usr/bin/systemctl status containerd --no-pager -l, \
+  /usr/bin/systemctl status docker --no-pager -l, \
+  /usr/bin/crictl ps -a, \
+  /usr/bin/docker ps -a --no-trunc, \
+  /usr/bin/journalctl -u kubelet --no-pager -n *, \
+  /usr/bin/journalctl -u containerd --no-pager -n *, \
+  /usr/bin/journalctl -u docker --no-pager -n *, \
+  /usr/bin/journalctl -u sshd --no-pager -n *
+
+codex-ro ALL=(root) NOPASSWD: CODEX_RO_SYSTEM

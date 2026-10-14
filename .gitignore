@@ -1,0 +1,26 @@
+# Build outputs
+dist/
+bin/
+*.exe
+*.test
+coverage.out
+
+# Runtime secrets and cluster access files
+*.token
+*.kubeconfig
+kubeconfig
+id_ed25519
+id_ed25519.pub
+known_hosts
+*.pem
+*.key
+
+# Runtime logs and local state
+logs/
+*.log
+audit.jsonl
+.codex-debug/
+HANDOFF.md
+
+# Intranet release binary is built separately, not committed.
+release/intranet-deploy/readonly-k8s-mcp

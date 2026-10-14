@@ -1,0 +1,21 @@
+[Unit]
+Description=Readonly Kubernetes MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=readonly-k8s-mcp
+Group=readonly-k8s-mcp
+ExecStart=/opt/readonly-k8s-mcp/readonly-k8s-mcp -config /opt/readonly-k8s-mcp/config.json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/readonly-k8s-mcp
+ReadWritePaths=/opt/readonly-k8s-mcp/logs
+
+[Install]
+WantedBy=multi-user.target

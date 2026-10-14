@@ -1,0 +1,41 @@
+{
+  "server": {
+    "listen": "0.0.0.0:8787"
+  },
+  "auth": {
+    "bearer_token": "CHANGE_ME"
+  },
+  "audit": {
+    "path": "/opt/readonly-k8s-mcp/logs/audit.jsonl"
+  },
+  "kubernetes": {
+    "kubectl": "/usr/bin/kubectl",
+    "kubeconfig": "/opt/readonly-k8s-mcp/kubeconfig",
+    "context": ""
+  },
+  "ssh": {
+    "binary": "/usr/bin/ssh",
+    "user": "codex-ro",
+    "identity_file": "/opt/readonly-k8s-mcp/id_ed25519",
+    "connect_timeout": "5s",
+    "strict_host_key_checking": "yes",
+    "known_hosts_file": "/opt/readonly-k8s-mcp/known_hosts"
+  },
+  "nodes": [
+    {
+      "name": "master-1",
+      "host": "10.0.0.10",
+      "local": false
+    },
+    {
+      "name": "worker-1",
+      "host": "10.0.0.11",
+      "local": false
+    }
+  ],
+  "limits": {
+    "command_timeout": "15s",
+    "max_output_bytes": 200000,
+    "max_log_lines": 200
+  }
+}

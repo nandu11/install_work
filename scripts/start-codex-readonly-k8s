@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+server_name="${READONLY_K8S_MCP_NAME:-readonlyK8s}"
+server_url="${READONLY_K8S_MCP_URL:-http://10.0.0.20:8787/mcp}"
+token_env_name="${READONLY_K8S_MCP_ENV_NAME:-READONLY_K8S_MCP_TOKEN}"
+token_file="${READONLY_K8S_MCP_TOKEN_FILE:-/tmp/readonly-k8s-mcp-10.0.0.20.token}"
+embedded_token=""
+
+die() {
+  printf 'start-codex-readonly-k8s: %s\n' "$*" >&2
+  exit 1
+}
+
+warn() {
+  printf 'start-codex-readonly-k8s: %s\n' "$*" >&2
+}
+
+command -v codex >/dev/null 2>&1 || die "codex command not found in PATH"
+
+token_value="${!token_env_name:-}"
+if [ -z "$token_value" ] && [ -n "$token_file" ]; then
+  [ -f "$token_file" ] || die "token file not found: $token_file"
+  IFS= read -r token_value < "$token_file" || true
+fi
+
+if [ -z "$token_value" ]; then
+  token_value="$embedded_token"
+fi
+
+if [ -n "$token_value" ]; then
+  export "$token_env_name=$token_value"
+  auth_header="Bearer $token_value"
+else
+  warn "$token_env_name is not set, no token file was provided, and no embedded token is configured"
+  auth_header=""
+fi
+
+exec codex \
+  --no-daemon \
+  --enable mcp_2026_07_28 \
+  -c "mcp_servers.${server_name}.url=\"${server_url}\"" \
+  -c "mcp_servers.${server_name}.bearer_token_env_var=\"\"" \
+  -c "mcp_servers.${server_name}.http_headers.Authorization=\"${auth_header}\"" \
+  "$@"
